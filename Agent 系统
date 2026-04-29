@@ -1,0 +1,1128 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+python-dotenv>=1.0.1
+openai>=2.0.0
+pytest>=8.0.0
+
+# 不填 OPENAI_API_KEY 也能运行，系统会使用离线模板模式。
+# 填入后会切换到真实 AI Agent 模式。
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.5
+APP_NAME=Project Incubator Agent
+DATABASE_PATH=workspace/incubator.sqlite3
+WORKSPACE_DIR=workspace/runs
+
+#!/usr/bin/env bash
+set -e
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Project Incubator Agent</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6fb;
+      color: #121826;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header {
+      padding: 56px 24px 28px;
+      text-align: center;
+      background: radial-gradient(circle at top, #ffffff 0, #eef2ff 58%, #f4f6fb 100%);
+    }
+    h1 { margin: 0 0 12px; font-size: clamp(32px, 6vw, 58px); letter-spacing: -0.04em; }
+    p { color: #5e687d; line-height: 1.7; }
+    main { max-width: 1080px; margin: 0 auto; padding: 22px; display: grid; gap: 20px; }
+    .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 20px; align-items: start; }
+    .card {
+      background: rgba(255,255,255,.92);
+      border: 1px solid #e4e8f4;
+      border-radius: 26px;
+      padding: 24px;
+      box-shadow: 0 18px 45px rgba(22, 34, 68, .08);
+    }
+    label { display: grid; gap: 8px; margin: 14px 0; color: #30384d; font-weight: 650; }
+    input, textarea, select, button {
+      width: 100%;
+      border: 1px solid #d7deee;
+      border-radius: 16px;
+      padding: 13px 14px;
+      font: inherit;
+      background: white;
+    }
+    textarea { min-height: 150px; resize: vertical; }
+    button {
+      border: none;
+      background: #121826;
+      color: white;
+      cursor: pointer;
+      font-weight: 700;
+      margin-top: 8px;
+    }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .result { white-space: pre-wrap; background: #0f172a; color: #e5edff; border-radius: 18px; padding: 18px; overflow: auto; max-height: 520px; }
+    .list { display: grid; gap: 12px; }
+    .run { padding: 14px; border: 1px solid #e4e8f4; border-radius: 18px; background: #fbfcff; }
+    .run strong { display: block; margin-bottom: 6px; }
+    .meta { color: #68748a; font-size: 13px; }
+    .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; background: #eef2ff; color: #3949ab; font-size: 12px; }
+    a { color: #3446d3; font-weight: 700; text-decoration: none; }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>个人项目孵化 Agent</h1>
+    <p>输入一个想法，自动生成产品简报、PRD、技术架构、路线图、任务清单、测试计划、Pitch 和可运行原型。</p>
+  </header>
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h2>开始孵化</h2>
+        <form id="form">
+          <label>项目想法
+            <textarea id="idea" required minlength="5" placeholder="例：一个帮助高中生规划复习和生成错题练习的学习助手"></textarea>
+          </label>
+          <label>目标用户
+            <input id="target_users" placeholder="例：高中生、自学编程的人、个人开发者" />
+          </label>
+          <label>目标平台
+            <select id="platform">
+              <option>Web 应用</option>
+              <option>微信小程序</option>
+              <option>移动 App</option>
+              <option>浏览器插件</option>
+              <option>命令行工具</option>
+            </select>
+          </label>
+          <label>限制条件
+            <input id="constraints" placeholder="例：3 天内完成、零预算、Python 技术栈" />
+          </label>
+          <label>
+            <span><input id="generate_prototype" type="checkbox" checked style="width:auto;margin-right:8px" />生成可运行 MVP 原型</span>
+          </label>
+          <button id="submit">生成项目包</button>
+        </form>
+      </section>
+      <section class="card">
+        <h2>结果</h2>
+        <div id="status" class="meta">等待输入项目想法。</div>
+        <div id="result" class="result" style="display:none"></div>
+      </section>
+    </div>
+    <section class="card">
+      <h2>历史记录</h2>
+      <div id="runs" class="list"></div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.querySelector('#form');
+    const submit = document.querySelector('#submit');
+    const statusBox = document.querySelector('#status');
+    const resultBox = document.querySelector('#result');
+    const runsBox = document.querySelector('#runs');
+
+    async function loadRuns() {
+      const res = await fetch('/api/runs');
+      const runs = await res.json();
+      if (!runs.length) {
+        runsBox.innerHTML = '<p class="meta">暂无历史记录。</p>';
+        return;
+      }
+      runsBox.innerHTML = runs.map(run => `
+        <div class="run">
+          <strong>${run.title}</strong>
+          <div class="meta">${new Date(run.created_at).toLocaleString()} · <span class="pill">${run.mode}</span> · ${run.artifact_count} 个文件</div>
+          <p>${run.summary}</p>
+          <a href="/api/runs/${run.id}/download">下载 ZIP</a>
+        </div>
+      `).join('');
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      statusBox.textContent = 'Agent 正在协作生成，首次 AI 模式可能需要几十秒...';
+      resultBox.style.display = 'none';
+      resultBox.textContent = '';
+      const payload = {
+        idea: document.querySelector('#idea').value,
+        target_users: document.querySelector('#target_users').value,
+        platform: document.querySelector('#platform').value,
+        constraints: document.querySelector('#constraints').value,
+        generate_prototype: document.querySelector('#generate_prototype').checked,
+      };
+      try {
+        const res = await fetch('/api/incubate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '生成失败');
+        statusBox.innerHTML = `完成：<span class="pill">${data.mode}</span> · <a href="${data.download_url}">下载 ZIP</a>`;
+        resultBox.style.display = 'block';
+        resultBox.textContent = data.summary + '\n\n文件：\n' + data.artifacts.map(x => '- ' + x).join('\n');
+        await loadRuns();
+      } catch (err) {
+        statusBox.textContent = err.message;
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    loadRuns();
+  </script>
+</body>
+</html>
+
+__all__ = []
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class Settings:
+    app_name: str = os.getenv("APP_NAME", "Project Incubator Agent")
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-5.5")
+    database_path: Path = Path(os.getenv("DATABASE_PATH", "workspace/incubator.sqlite3"))
+    workspace_dir: Path = Path(os.getenv("WORKSPACE_DIR", "workspace/runs"))
+
+
+settings = Settings()
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class IncubationRequest(BaseModel):
+    idea: str = Field(..., min_length=5, max_length=4000, description="项目想法")
+    target_users: str = Field("", max_length=1000, description="目标用户，可选")
+    platform: str = Field("Web 应用", max_length=100, description="目标平台")
+    constraints: str = Field("", max_length=1500, description="限制条件，如预算、时间、技术栈")
+    generate_prototype: bool = Field(True, description="是否生成可运行 MVP 原型")
+
+
+class IncubationSummary(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    mode: str
+    summary: str
+    artifacts: list[str]
+    download_url: str
+
+
+class RunItem(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    mode: str
+    summary: str
+    artifact_count: int
+
+from __future__ import annotations
+
+BLOCKED_KEYWORDS = [
+    # 这些不是“审查”，只是避免系统生成明显不适合未成年人或高风险方向的执行方案。
+    "weapon", "gun", "ammo", "knife", "explosive", "drugs", "gambling", "casino",
+    "porn", "adult content", "vape", "nicotine", "thc", "marijuana", "hacking", "phishing",
+    "枪", "弹药", "刀", "爆炸", "毒品", "赌博", "赌场", "色情", "成人内容", "电子烟", "尼古丁",
+    "大麻", "钓鱼网站", "盗号",
+]
+
+
+def validate_idea(text: str) -> tuple[bool, str]:
+    lowered = text.lower()
+    for keyword in BLOCKED_KEYWORDS:
+        if keyword.lower() in lowered:
+            return False, "这个项目方向可能涉及高风险或不适合未成年人的内容，系统不会生成执行方案。请换成学习、效率、生活服务、公益、创作或开发工具类方向。"
+    return True, "ok"
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class LLMResult:
+    text: str
+    mode: str
+
+
+class LLMClient:
+    """Small wrapper around OpenAI Responses API with an offline fallback.
+
+    The system runs without an API key. With OPENAI_API_KEY set, it calls OpenAI.
+    """
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self._client = None
+        if self.api_key:
+            try:
+                from openai import OpenAI
+
+                self._client = OpenAI(api_key=self.api_key)
+            except Exception:
+                self._client = None
+
+    @property
+    def mode(self) -> str:
+        return "ai" if self._client else "offline-template"
+
+    def complete(self, *, system: str, user: str, fallback: str) -> LLMResult:
+        if not self._client:
+            return LLMResult(text=fallback.strip(), mode=self.mode)
+
+        try:
+            response = self._client.responses.create(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            output_text = getattr(response, "output_text", "") or ""
+            if not output_text.strip():
+                return LLMResult(text=fallback.strip(), mode="ai-empty-fallback")
+            return LLMResult(text=output_text.strip(), mode=self.mode)
+        except Exception as exc:  # keep the app runnable even when API fails
+            return LLMResult(
+                text=(fallback.strip() + f"\n\n> AI 调用失败，已使用离线模板。错误：{type(exc).__name__}: {exc}"),
+                mode="ai-error-fallback",
+            )
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from textwrap import dedent
+
+from .llm import LLMClient, LLMResult
+
+
+@dataclass
+class ProjectContext:
+    idea: str
+    target_users: str
+    platform: str
+    constraints: str
+
+    def as_text(self) -> str:
+        return dedent(
+            f"""
+            项目想法：{self.idea}
+            目标用户：{self.target_users or '未指定，请自行合理假设'}
+            目标平台：{self.platform}
+            限制条件：{self.constraints or '无特殊限制'}
+            """
+        ).strip()
+
+
+class BaseAgent:
+    name = "BaseAgent"
+    role = "你是一个严谨的创业项目孵化 Agent。"
+
+    def __init__(self, llm: LLMClient) -> None:
+        self.llm = llm
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        raise NotImplementedError
+
+    def _complete(self, context: ProjectContext, previous: dict[str, str], task: str, fallback: str) -> LLMResult:
+        prev_text = "\n\n".join(f"## {k}\n{v}" for k, v in previous.items()) or "无"
+        user = dedent(
+            f"""
+            你需要为一个个人项目孵化系统输出一个可直接保存为 Markdown 的文档。
+
+            # 项目背景
+            {context.as_text()}
+
+            # 已有上游 Agent 输出
+            {prev_text}
+
+            # 当前任务
+            {task}
+            """
+        ).strip()
+        return self.llm.complete(system=self.role, user=user, fallback=fallback)
+
+
+class ProductAnalystAgent(BaseAgent):
+    name = "01_PRODUCT_BRIEF.md"
+    role = "你是产品分析 Agent，擅长从模糊想法里提炼用户、痛点、价值主张和 MVP 边界。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            f"""
+            # 产品简报
+
+            ## 一句话概述
+            基于“{context.idea}”构建一个面向 {context.target_users or '早期个人用户'} 的 {context.platform} MVP，先解决一个高频、明确、可验证的小痛点。
+
+            ## 核心用户
+            - 第一批用户：{context.target_users or '有明确效率/学习/创作需求的个人用户'}
+            - 使用场景：用户有一个想法，但缺少从需求、设计、任务拆解到原型落地的系统流程。
+            - 用户目标：用更短时间得到可展示、可测试、可迭代的 MVP。
+
+            ## 核心痛点
+            1. 想法很多，但不知道第一版应该做哪些功能。
+            2. 不会把想法转成 PRD、技术方案、任务清单和测试计划。
+            3. 个人项目容易卡在规划阶段，缺少可执行的下一步。
+
+            ## 价值主张
+            系统把“想法 → 产品定义 → 技术方案 → 开发任务 → 测试计划 → 演示文案”串成一条流水线，帮助用户在 1 天内完成通常需要数天的项目前期准备。
+
+            ## MVP 边界
+            第一版只做：想法输入、Agent 协作生成文档、生成可运行原型、导出项目包。不做复杂团队协同、支付、权限系统和大型部署平台。
+
+            ## 成功指标
+            - 用户能在 10 分钟内完成一次项目孵化。
+            - 输出至少包含 PRD、架构、任务、测试、Pitch 和可运行原型。
+            - 生成内容人工修改比例低于 40%。
+            """
+        )
+        task = "输出产品简报：一句话概述、核心用户、痛点、价值主张、MVP 边界、成功指标。不要空泛，要可落地。"
+        return self._complete(context, previous, task, fallback)
+
+
+class PRDAgent(BaseAgent):
+    name = "02_PRD.md"
+    role = "你是 PRD Agent，擅长把产品简报转为清晰需求文档。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            """
+            # PRD 产品需求文档
+
+            ## 目标
+            将用户输入的项目想法转化为一组结构化产物：产品简报、需求文档、技术架构、任务列表、测试计划、演示文案和 MVP 原型。
+
+            ## 用户故事
+            - 作为个人开发者，我想输入一句项目想法，以便快速获得完整项目规划。
+            - 作为学生/创作者，我想看到清晰的 MVP 功能范围，以便避免一开始做得太大。
+            - 作为开发者，我想下载生成结果和代码原型，以便继续二次开发。
+
+            ## 功能需求
+            1. 项目输入表单：想法、目标用户、平台、限制条件。
+            2. 多 Agent 编排：按产品、PRD、架构、任务、测试、Pitch 顺序生成。
+            3. 结果页：展示摘要、生成文件列表、下载链接。
+            4. 历史记录：保存每次孵化记录。
+            5. 原型生成：生成一个基础 Web MVP 项目骨架。
+
+            ## 非功能需求
+            - 本地可运行，默认离线模板模式。
+            - 有 API Key 时可调用真实模型。
+            - 生成结果保存在本地 workspace 中。
+            - 遇到模型失败时不崩溃，自动回退模板。
+
+            ## 暂不做
+            - 多用户登录。
+            - 在线部署。
+            - 复杂付费系统。
+            - 自动提交 GitHub。
+            """
+        )
+        task = "输出 PRD：目标、用户故事、功能需求、非功能需求、暂不做、验收标准。"
+        return self._complete(context, previous, task, fallback)
+
+
+class ArchitectureAgent(BaseAgent):
+    name = "03_ARCHITECTURE.md"
+    role = "你是架构 Agent，擅长把需求拆成模块、数据模型、API、目录结构和部署方案。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            """
+            # 技术架构
+
+            ## 推荐技术栈
+            - 后端：FastAPI
+            - 前端：原生 HTML/CSS/JavaScript，降低启动成本
+            - 数据库：SQLite
+            - AI 接入：OpenAI Responses API；无 Key 时使用本地模板
+            - 文件产物：Markdown + ZIP
+
+            ## 模块划分
+            1. API 层：接收项目输入、返回运行结果、提供下载。
+            2. 编排层：按顺序执行多个 Agent。
+            3. Agent 层：产品、PRD、架构、任务、测试、Pitch。
+            4. LLM 层：统一封装模型调用和回退逻辑。
+            5. 存储层：SQLite 保存历史记录，workspace 保存文件产物。
+            6. 原型生成层：创建一个可运行的 MVP 项目骨架。
+
+            ## 数据模型
+            runs 表：id、title、idea、created_at、mode、summary、output_dir。
+
+            ## API 设计
+            - POST /api/incubate：创建一次项目孵化。
+            - GET /api/runs：查看历史孵化记录。
+            - GET /api/runs/{id}：查看某次孵化详情。
+            - GET /api/runs/{id}/download：下载产物 ZIP。
+
+            ## 部署
+            本地运行：uvicorn app.main:app --reload --port 8000。后续可部署到 Render、Railway、Fly.io 或 VPS。
+            """
+        )
+        task = "输出技术架构：技术栈、模块划分、数据模型、API 设计、目录结构、部署建议。"
+        return self._complete(context, previous, task, fallback)
+
+
+class RoadmapAgent(BaseAgent):
+    name = "04_ROADMAP.md"
+    role = "你是项目经理 Agent，擅长制定短周期路线图、里程碑和风险控制。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            """
+            # 路线图
+
+            ## Day 1：需求和骨架
+            - 完成输入表单、API、SQLite 存储。
+            - 完成 Agent 输出的文件保存。
+            - 完成下载 ZIP。
+
+            ## Day 2：生成质量
+            - 优化 Prompt。
+            - 增加离线模板兜底。
+            - 增加项目摘要和文件预览。
+
+            ## Day 3：原型生成
+            - 生成可运行 MVP 原型目录。
+            - 给原型加入 README 和启动命令。
+            - 完成基本测试。
+
+            ## Day 4-5：打磨和演示
+            - 增加 UI 样式。
+            - 录制演示流程。
+            - 收集 3 个真实项目想法测试输出质量。
+
+            ## 主要风险
+            - 生成内容太空泛：通过固定结构和验收标准解决。
+            - 模型失败：保留离线模板兜底。
+            - 项目范围膨胀：只支持个人项目的 MVP 前期规划。
+            """
+        )
+        task = "输出路线图：按 3-7 天拆里程碑、每阶段交付物、风险和应对。"
+        return self._complete(context, previous, task, fallback)
+
+
+class TaskPlannerAgent(BaseAgent):
+    name = "05_TASKS.md"
+    role = "你是任务拆解 Agent，擅长把项目拆成可执行 issue。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            """
+            # 开发任务清单
+
+            ## P0 必做
+            - [ ] 创建 FastAPI 项目结构。
+            - [ ] 实现 POST /api/incubate。
+            - [ ] 实现 Agent 编排器。
+            - [ ] 保存 Markdown 产物到 workspace。
+            - [ ] 实现 ZIP 下载。
+            - [ ] 创建简单前端页面。
+
+            ## P1 重要
+            - [ ] 增加历史记录页面。
+            - [ ] 增加原型项目生成器。
+            - [ ] 增加错误提示和空状态。
+            - [ ] 为核心逻辑写单元测试。
+
+            ## P2 可选
+            - [ ] 增加多套模板。
+            - [ ] 支持导出 Notion/飞书格式。
+            - [ ] 支持选择技术栈。
+            - [ ] 支持对单个文档重新生成。
+
+            ## 验收标准
+            输入一个项目想法后，系统能生成至少 6 个文档和 1 个可运行原型，并提供下载链接。
+            """
+        )
+        task = "输出开发任务清单：P0/P1/P2、每项要有验收标准。"
+        return self._complete(context, previous, task, fallback)
+
+
+class QAAgent(BaseAgent):
+    name = "06_TEST_PLAN.md"
+    role = "你是测试 Agent，擅长设计功能测试、边界测试和质量检查清单。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            """
+            # 测试计划
+
+            ## 功能测试
+            - 输入正常项目想法，应生成完整产物。
+            - 不填目标用户和限制条件，应使用合理默认值。
+            - 点击下载，应得到包含 Markdown 和 prototype 的 ZIP。
+            - 查看历史记录，应看到最近运行结果。
+
+            ## 边界测试
+            - 输入过短，前端/后端应提示。
+            - 没有 OPENAI_API_KEY，应进入离线模板模式。
+            - 模型调用失败，应自动回退模板。
+            - 重复运行，应生成不同 run id，不覆盖旧文件。
+
+            ## 质量检查
+            - 每个文档都有标题。
+            - 任务清单可执行，不只是口号。
+            - 架构文档包含 API 和数据模型。
+            - 原型 README 包含启动命令。
+            """
+        )
+        task = "输出测试计划：功能测试、边界测试、质量检查、演示前检查。"
+        return self._complete(context, previous, task, fallback)
+
+
+class PitchAgent(BaseAgent):
+    name = "07_PITCH.md"
+    role = "你是 Pitch Agent，擅长把项目包装成申请表、路演稿和展示文案。"
+
+    def run(self, context: ProjectContext, previous: dict[str, str]) -> LLMResult:
+        fallback = dedent(
+            f"""
+            # 项目展示文案
+
+            我构建了一个个人项目孵化 Agent 系统，目标是把“{context.idea}”这类早期想法快速推进到可演示 MVP。系统会先提炼目标用户、核心痛点和 MVP 范围，再由 PRD Agent、架构 Agent、任务 Agent、测试 Agent 和 Pitch Agent 依次生成项目文档。最后，系统会自动生成一个可运行的基础原型，并把所有结果打包下载。
+
+            这个项目解决的核心问题是：很多个人开发者、学生和创作者有想法，但缺少从想法到执行的结构化流程。通过多 Agent 协作，用户可以在几分钟内得到产品定义、技术方案、任务列表和演示文案，把原本需要数天的准备工作压缩到一次自动化流程中。
+
+            第一版已经包含本地 Web 界面、SQLite 历史记录、OpenAI 接入、离线模板兜底和 ZIP 导出。预期效果是把个人项目从想法到可开发计划的时间减少 70% 以上，并帮助用户更快完成 MVP 验证。
+            """
+        )
+        task = "输出一段适合申请表填写的项目展示文案：项目做了什么、解决什么痛点、Agent 如何协作、具体产出、量化效果。"
+        return self._complete(context, previous, task, fallback)
+
+
+AGENT_CLASSES = [
+    ProductAnalystAgent,
+    PRDAgent,
+    ArchitectureAgent,
+    RoadmapAgent,
+    TaskPlannerAgent,
+    QAAgent,
+    PitchAgent,
+]
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from textwrap import dedent
+
+from .agents import ProjectContext
+
+
+def slugify(text: str, fallback: str = "mvp") -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text[:40] or fallback
+
+
+def make_title(idea: str) -> str:
+    clean = re.sub(r"\s+", " ", idea).strip()
+    return clean[:28] + ("..." if len(clean) > 28 else "")
+
+
+def generate_prototype(project_dir: Path, context: ProjectContext, docs: dict[str, str]) -> Path:
+    """Create a tiny but runnable FastAPI MVP prototype for the user's idea."""
+    proto = project_dir / "prototype"
+    static = proto / "static"
+    static.mkdir(parents=True, exist_ok=True)
+
+    title = make_title(context.idea)
+    spec = {
+        "title": title,
+        "idea": context.idea,
+        "target_users": context.target_users or "早期个人用户",
+        "platform": context.platform,
+        "constraints": context.constraints,
+        "features": [
+            "记录用户需求或任务",
+            "按优先级管理 MVP 功能",
+            "保存反馈并快速迭代",
+        ],
+    }
+
+    (proto / "requirements.txt").write_text("fastapi>=0.115.0\nuvicorn[standard]>=0.30.0\npydantic>=2.7.0\n", encoding="utf-8")
+    (proto / "project_spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    (proto / "README.md").write_text(
+        dedent(
+            f"""
+            # {title} - MVP 原型
+
+            这是由 Project Incubator Agent 自动生成的最小可运行原型。
+
+            ## 启动
+
+            ```bash
+            cd prototype
+            python -m venv .venv
+            source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+            pip install -r requirements.txt
+            uvicorn main:app --reload --port 8010
+            ```
+
+            打开浏览器访问：http://127.0.0.1:8010
+
+            ## 你接下来可以改什么
+            - 把 `project_spec.json` 里的 features 改成真实功能。
+            - 在 `main.py` 增加数据库。
+            - 在 `static/index.html` 改 UI。
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    (proto / "main.py").write_text(
+        dedent(
+            f'''
+            from __future__ import annotations
+
+            from pathlib import Path
+            from typing import Literal
+            from uuid import uuid4
+
+            from fastapi import FastAPI, HTTPException
+            from fastapi.responses import HTMLResponse
+            from pydantic import BaseModel, Field
+
+            app = FastAPI(title={title!r})
+            DATA: list[dict] = []
+
+
+            class ItemIn(BaseModel):
+                title: str = Field(..., min_length=1, max_length=120)
+                description: str = Field("", max_length=1000)
+                priority: Literal["P0", "P1", "P2"] = "P1"
+
+
+            @app.get("/", response_class=HTMLResponse)
+            def home() -> str:
+                return Path("static/index.html").read_text(encoding="utf-8")
+
+
+            @app.get("/api/items")
+            def list_items() -> list[dict]:
+                return DATA
+
+
+            @app.post("/api/items")
+            def create_item(item: ItemIn) -> dict:
+                row = {{"id": str(uuid4()), **item.model_dump()}}
+                DATA.append(row)
+                return row
+
+
+            @app.delete("/api/items/{{item_id}}")
+            def delete_item(item_id: str) -> dict:
+                for idx, row in enumerate(DATA):
+                    if row["id"] == item_id:
+                        DATA.pop(idx)
+                        return {{"ok": True}}
+                raise HTTPException(status_code=404, detail="Item not found")
+            '''
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    (static / "index.html").write_text(
+        dedent(
+            f"""
+            <!doctype html>
+            <html lang="zh-CN">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>{title}</title>
+              <style>
+                :root {{ font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #172033; background: #f7f7fb; }}
+                body {{ margin: 0; }}
+                header {{ padding: 42px 20px 24px; text-align: center; }}
+                main {{ max-width: 960px; margin: 0 auto; padding: 0 20px 56px; }}
+                .card {{ background: white; border: 1px solid #e7e9f2; border-radius: 22px; padding: 22px; box-shadow: 0 12px 36px rgba(25, 32, 56, .08); margin-bottom: 18px; }}
+                h1 {{ margin: 0 0 10px; font-size: 34px; }}
+                p {{ line-height: 1.7; color: #5a6478; }}
+                form {{ display: grid; gap: 12px; }}
+                input, textarea, select, button {{ font: inherit; border-radius: 14px; border: 1px solid #d8dcea; padding: 12px 14px; }}
+                textarea {{ min-height: 90px; }}
+                button {{ background: #172033; color: white; cursor: pointer; border: none; }}
+                .item {{ display: grid; gap: 6px; border-top: 1px solid #edf0f7; padding: 14px 0; }}
+                .badge {{ display: inline-block; width: max-content; padding: 4px 10px; border-radius: 999px; background: #eef1ff; color: #3949ab; font-size: 12px; }}
+                .muted {{ color: #7b8498; }}
+              </style>
+            </head>
+            <body>
+              <header>
+                <h1>{title}</h1>
+                <p>{context.idea}</p>
+              </header>
+              <main>
+                <section class="card">
+                  <h2>新增 MVP 任务/需求</h2>
+                  <form id="form">
+                    <input id="title" placeholder="任务标题，例如：设计首页输入框" required />
+                    <textarea id="description" placeholder="描述一下这个任务要解决什么问题"></textarea>
+                    <select id="priority">
+                      <option value="P0">P0 必做</option>
+                      <option value="P1" selected>P1 重要</option>
+                      <option value="P2">P2 可选</option>
+                    </select>
+                    <button>保存</button>
+                  </form>
+                </section>
+                <section class="card">
+                  <h2>当前列表</h2>
+                  <div id="items" class="muted">加载中...</div>
+                </section>
+              </main>
+              <script>
+                const items = document.querySelector('#items');
+                const form = document.querySelector('#form');
+                async function load() {{
+                  const res = await fetch('/api/items');
+                  const data = await res.json();
+                  if (!data.length) {{ items.innerHTML = '还没有内容，先新增一条。'; return; }}
+                  items.innerHTML = data.map(row => `
+                    <div class="item">
+                      <span class="badge">${{row.priority}}</span>
+                      <strong>${{row.title}}</strong>
+                      <span class="muted">${{row.description || '无描述'}}</span>
+                      <button onclick="removeItem('${{row.id}}')">删除</button>
+                    </div>
+                  `).join('');
+                }}
+                async function removeItem(id) {{
+                  await fetch('/api/items/' + id, {{ method: 'DELETE' }});
+                  await load();
+                }}
+                form.addEventListener('submit', async (event) => {{
+                  event.preventDefault();
+                  await fetch('/api/items', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                      title: document.querySelector('#title').value,
+                      description: document.querySelector('#description').value,
+                      priority: document.querySelector('#priority').value,
+                    }})
+                  }});
+                  form.reset();
+                  await load();
+                }});
+                load();
+              </script>
+            </body>
+            </html>
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    return proto
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+
+class Store:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.init_db()
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def init_db(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    idea TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    output_dir TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def insert_run(self, *, id: str, title: str, idea: str, created_at: str, mode: str, summary: str, output_dir: Path) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runs (id, title, idea, created_at, mode, summary, output_dir)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (id, title, idea, created_at, mode, summary, str(output_dir)),
+            )
+            conn.commit()
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from .agents import AGENT_CLASSES, ProjectContext
+from .config import settings
+from .llm import LLMClient
+from .models import IncubationRequest, IncubationSummary
+from .prototype import generate_prototype, make_title, slugify
+from .safety import validate_idea
+from .store import Store
+
+
+class ProjectIncubator:
+    def __init__(self, store: Store | None = None, workspace_dir: Path | None = None, llm: LLMClient | None = None) -> None:
+        self.store = store or Store(settings.database_path)
+        self.workspace_dir = workspace_dir or settings.workspace_dir
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.llm = llm or LLMClient(settings.openai_model)
+
+    def incubate(self, req: IncubationRequest) -> IncubationSummary:
+        ok, message = validate_idea(" ".join([req.idea, req.target_users, req.constraints]))
+        if not ok:
+            raise ValueError(message)
+
+        title = make_title(req.idea)
+        run_id = f"{slugify(title)}-{uuid4().hex[:8]}"
+        created_at = datetime.now(timezone.utc).isoformat()
+        run_dir = self.workspace_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        context = ProjectContext(
+            idea=req.idea,
+            target_users=req.target_users,
+            platform=req.platform,
+            constraints=req.constraints,
+        )
+
+        previous: dict[str, str] = {}
+        modes: list[str] = []
+        for agent_cls in AGENT_CLASSES:
+            agent = agent_cls(self.llm)
+            result = agent.run(context, previous)
+            previous[agent.name] = result.text
+            modes.append(result.mode)
+            (run_dir / agent.name).write_text(result.text.strip() + "\n", encoding="utf-8")
+
+        if req.generate_prototype:
+            generate_prototype(run_dir, context, previous)
+
+        summary = self._build_summary(title, context, previous)
+        (run_dir / "README.md").write_text(summary + "\n", encoding="utf-8")
+        (run_dir / "project_spec.json").write_text(
+            json.dumps(
+                {
+                    "id": run_id,
+                    "title": title,
+                    "idea": req.idea,
+                    "target_users": req.target_users,
+                    "platform": req.platform,
+                    "constraints": req.constraints,
+                    "created_at": created_at,
+                    "mode": self._mode_label(modes),
+                    "artifacts": self._artifacts(run_dir),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        zip_path = self._zip_run(run_dir)
+        mode = self._mode_label(modes)
+        self.store.insert_run(
+            id=run_id,
+            title=title,
+            idea=req.idea,
+            created_at=created_at,
+            mode=mode,
+            summary=summary.split("\n\n", 1)[0].replace("# ", ""),
+            output_dir=run_dir,
+        )
+
+        artifacts = self._artifacts(run_dir)
+        if zip_path.name not in artifacts:
+            artifacts.append(zip_path.name)
+        return IncubationSummary(
+            id=run_id,
+            title=title,
+            created_at=created_at,
+            mode=mode,
+            summary=summary,
+            artifacts=artifacts,
+            download_url=f"/api/runs/{run_id}/download",
+        )
+
+    def get_download_path(self, run_id: str) -> Path | None:
+        row = self.store.get_run(run_id)
+        if not row:
+            return None
+        run_dir = Path(row["output_dir"])
+        zip_path = run_dir.with_suffix(".zip")
+        return zip_path if zip_path.exists() else None
+
+    def get_run_detail(self, run_id: str) -> dict | None:
+        row = self.store.get_run(run_id)
+        if not row:
+            return None
+        run_dir = Path(row["output_dir"])
+        row["artifacts"] = self._artifacts(run_dir) if run_dir.exists() else []
+        return row
+
+    def _zip_run(self, run_dir: Path) -> Path:
+        zip_path = run_dir.with_suffix(".zip")
+        if zip_path.exists():
+            zip_path.unlink()
+        shutil.make_archive(str(run_dir), "zip", root_dir=run_dir)
+        return zip_path
+
+    def _artifacts(self, run_dir: Path) -> list[str]:
+        files = []
+        for path in sorted(run_dir.rglob("*")):
+            if path.is_file():
+                files.append(str(path.relative_to(run_dir)))
+        return files
+
+    def _mode_label(self, modes: list[str]) -> str:
+        if any(m == "ai" for m in modes):
+            return "ai"
+        if any("error" in m for m in modes):
+            return "ai-error-fallback"
+        return "offline-template"
+
+    def _build_summary(self, title: str, context: ProjectContext, docs: dict[str, str]) -> str:
+        return (
+            f"# {title}\n\n"
+            f"项目想法：{context.idea}\n\n"
+            "## 已生成产物\n"
+            "- 产品简报\n"
+            "- PRD 产品需求文档\n"
+            "- 技术架构\n"
+            "- 路线图\n"
+            "- 开发任务清单\n"
+            "- 测试计划\n"
+            "- 项目展示文案\n"
+            "- 可运行 MVP 原型 prototype/\n\n"
+            "## 建议下一步\n"
+            "1. 先阅读 01_PRODUCT_BRIEF.md 和 02_PRD.md，确认 MVP 范围。\n"
+            "2. 运行 prototype/，把核心功能改成你的真实业务。\n"
+            "3. 按 05_TASKS.md 从 P0 开始开发。\n"
+            "4. 用 06_TEST_PLAN.md 做演示前检查。\n"
+        )
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+
+from .config import settings
+from .models import IncubationRequest, IncubationSummary, RunItem
+from .orchestrator import ProjectIncubator
+from .store import Store
+
+app = FastAPI(title=settings.app_name)
+store = Store(settings.database_path)
+incubator = ProjectIncubator(store=store, workspace_dir=settings.workspace_dir)
+
+
+@app.get("/", response_class=HTMLResponse)
+def home() -> str:
+    html_path = Path(__file__).parent / "static" / "index.html"
+    return html_path.read_text(encoding="utf-8")
+
+
+@app.post("/api/incubate", response_model=IncubationSummary)
+def incubate(req: IncubationRequest) -> IncubationSummary:
+    try:
+        return incubator.incubate(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/runs", response_model=list[RunItem])
+def list_runs() -> list[RunItem]:
+    rows = store.list_runs()
+    items: list[RunItem] = []
+    for row in rows:
+        output_dir = Path(row["output_dir"])
+        count = len([p for p in output_dir.rglob("*") if p.is_file()]) if output_dir.exists() else 0
+        items.append(
+            RunItem(
+                id=row["id"],
+                title=row["title"],
+                created_at=row["created_at"],
+                mode=row["mode"],
+                summary=row["summary"],
+                artifact_count=count,
+            )
+        )
+    return items
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str) -> dict:
+    detail = incubator.get_run_detail(run_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return detail
+
+
+@app.get("/api/runs/{run_id}/download")
+def download_run(run_id: str) -> FileResponse:
+    zip_path = incubator.get_download_path(run_id)
+    if not zip_path:
+        raise HTTPException(status_code=404, detail="Download not found")
+    return FileResponse(path=zip_path, filename=zip_path.name, media_type="application/zip")
